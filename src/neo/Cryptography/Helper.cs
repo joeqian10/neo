@@ -1,13 +1,15 @@
 using Neo.IO;
 using Neo.Network.P2P.Payloads;
+using ECPoint = Neo.Cryptography.ECC.ECPoint;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Security;
-using System.Security.Cryptography;
 using System.Text;
+using System.Security.Cryptography;
 
 namespace Neo.Cryptography
 {
@@ -151,6 +153,115 @@ namespace Neo.Cryptography
                 Marshal.ZeroFreeGlobalAllocAnsi(ptr);
             }
             return result.ToArray();
+        }
+
+        public static byte[] AES256Decrypt(this byte[] block, byte[] key)
+        {
+            using (Aes aes = Aes.Create())
+            {
+                aes.Key = key;
+                aes.Mode = CipherMode.ECB;
+                aes.Padding = PaddingMode.Zeros;
+                using (ICryptoTransform decryptor = aes.CreateDecryptor())
+                {
+                    return decryptor.TransformFinalBlock(block, 0, block.Length);
+                }
+            }
+        }
+
+        public static byte[] AES256Encrypt(this byte[] block, byte[] key)
+        {
+            using (Aes aes = Aes.Create())
+            {
+                aes.Key = key;
+                aes.Mode = CipherMode.ECB;
+                aes.Padding = PaddingMode.Zeros;
+                using (ICryptoTransform encryptor = aes.CreateEncryptor())
+                {
+                    return encryptor.TransformFinalBlock(block, 0, block.Length);
+                }
+            }
+        }
+
+        public static byte[] ECEncrypt(byte[] message, ECPoint pubKey)
+        {
+            // 1. choose a random number, k < n
+            BigInteger k, r;
+            ECPoint R;
+            var curve = pubKey.Curve;
+            using (RandomNumberGenerator rng = RandomNumberGenerator.Create())
+            {
+                do
+                {
+                    do
+                    {
+                        k = rng.NextBigInteger((int)curve.N.GetBitLength());
+                    }
+                    while (k.Sign == 0 || k.CompareTo(curve.N) >= 0);
+                    R = ECPoint.Multiply(curve.G, k);
+                    BigInteger x = R.X.Value;
+                    r = x.Mod(curve.N);
+                }
+                while (r.Sign == 0);
+            }
+
+            // 2. using point compression for R
+            byte[] RBar = R.EncodePoint(true);
+
+            // 3. get the shared secret field element
+            var z = ECPoint.Multiply(pubKey, k).X; // z = k * v.pubKey = k * d * G
+
+            // 4. get Z
+            var Z = z.ToByteArray();
+
+            // 5. using KDF, todo
+
+            // 6. get EK, using sha256 instead
+            var EK = Z.Sha256();
+
+            // 7. encrypt M under EK as EM
+            var EM = message.AES256Encrypt(EK);
+
+            // 8. get tag D, skip
+
+            // 9. concat
+            return RBar.Concat(EM).ToArray();
+        }
+
+        public static byte[] ECDecrypt(byte[] cypher, byte[] priKey, ECPoint pubKey)
+        {
+            // 1. get RBar, since using encoded format, lenght is 33, starting with 0x02 or 0x03
+            if (cypher is null || cypher.Length < 33)
+                throw new ArgumentException();
+            if (cypher[0] != 0x02 && cypher[0] != 0x03)
+                throw new ArgumentException();
+            var RBar = cypher.Take(33).ToArray();
+            var EM = cypher.Skip(33).ToArray();
+
+            // 2. convert RBar to ECPoint R
+            var R = ECPoint.FromBytes(RBar, pubKey.Curve);
+
+            // 3. validate R, skip
+
+            // 4. get z
+            var d = new BigInteger(priKey.Reverse().Concat(new byte[1]).ToArray());
+            var z = ECPoint.Multiply(R, d).X; // z = d * R = d * k * G
+
+            // 5. get Z
+            var Z = z.ToByteArray();
+
+            // 6. using KDF, todo
+
+            // 7. get EK, using sha256 instead
+            var EK = Z.Sha256();
+
+            // 8. get D, skip
+
+            // 9. decrypt EM under EK as M
+            var M = EM.AES256Decrypt(EK);
+
+            // 10. return M
+            return M;
         }
     }
 }
